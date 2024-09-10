@@ -169,6 +169,8 @@ var (
 	NewEngine = Bool("OLLAMA_NEW_ENGINE")
 	// ContextLength sets the default context length
 	ContextLength = Uint("OLLAMA_CONTEXT_LENGTH", 2048)
+	// RPCServers sepecifies a comma seperated list of RPC servers to use for inteference.
+	RPCServers = String("OLLAMA_RPC_SERVERS")
 )
 
 func String(s string) func() string {
