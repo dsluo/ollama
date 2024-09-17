@@ -11,8 +11,10 @@ package discover
 import "C"
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,11 +45,70 @@ const (
 	// TODO OneAPI minimum memory
 )
 
+// RPCServerMemory checks and total and free memory in bytes of a given RPC
+// endpoint.
+//
+// If the RPC endpoint given is unavailble (unable to connect), the total and
+// free memory returned would be 0.
+func RPCServerMemory(endpoint string) RPCServerMemoryResult {
+	// Creating RPC client
+	client, err := net.Dial("tcp", endpoint)
+	if err != nil {
+		return RPCServerMemoryResult{}
+	}
+	defer client.Close()
+
+	// Sending command to get memory
+	// RPC Command (1 byte)
+	_, err = client.Write([]byte{10})
+	if err != nil {
+		return RPCServerMemoryResult{}
+	}
+	// Input Size (8 bytes)
+	size := [8]byte{}
+	_, err = client.Write(size[:])
+	if err != nil {
+		return RPCServerMemoryResult{}
+	}
+
+	// Retrieving results
+	// Getting reply size (8 bytes)
+	reply := [8]byte{}
+	_, err = client.Read(reply[:])
+	if err != nil {
+		return RPCServerMemoryResult{}
+	}
+	reply_size := binary.LittleEndian.Uint64(reply[:])
+	// Reply size should be 16 according to spec
+	if reply_size != 16 {
+		return RPCServerMemoryResult{}
+	}
+	// Getting main reply
+	// The free memory of the RPC server (8 bytes)
+	freeMem := [8]byte{}
+	_, err = client.Read(freeMem[:])
+	if err != nil {
+		return RPCServerMemoryResult{}
+	}
+	// The total memory of the RPC server (8 bytes)
+	totalMem := [8]byte{}
+	_, err = client.Read(totalMem[:])
+	if err != nil {
+		return RPCServerMemoryResult{}
+	}
+
+	return RPCServerMemoryResult{
+		FreeMem:  binary.LittleEndian.Uint64(freeMem[:]),
+		TotalMem: binary.LittleEndian.Uint64(totalMem[:]),
+	}
+}
+
 var (
 	gpuMutex      sync.Mutex
 	bootstrapped  bool
 	cpus          []CPUInfo
 	cudaGPUs      []CudaGPUInfo
+	rpcServers    []RPCServerInfo
 	nvcudaLibPath string
 	cudartLibPath string
 	oneapiLibPath string
@@ -249,6 +310,49 @@ func GetGPUInfo() GpuInfoList {
 
 		// Load ALL libraries
 		cHandles = initCudaHandles()
+
+		// RPC Servers
+		rpcServersENV := envconfig.RPCServers()
+		rpcServersList := strings.Split(rpcServersENV, ",")
+		for _, server := range rpcServersList {
+			// No servers given
+			if server == "" {
+				break
+			}
+
+			// Getting information
+			info := RPCServerMemory(server)
+			serverAddress := strings.Split(server, ":")
+			// We got an invalid server address
+			if len(serverAddress) != 2 {
+				slog.Warn("Invalid RPC endpoint server address", "endpoint", server)
+				continue
+			}
+			// Invalid port number
+			port, err := strconv.ParseUint(serverAddress[1], 10, 16)
+			if err != nil {
+				slog.Warn("Invalid RPC endpoint port number", "endpoint", server)
+				continue
+			}
+
+			serverInfo := RPCServerInfo{
+				GpuInfo: GpuInfo{
+					ID:      server,
+					Library: "rpc",
+				},
+				host: serverAddress[0],
+				port: uint16(port),
+			}
+			serverInfo.TotalMemory = info.TotalMem
+			serverInfo.FreeMemory = info.FreeMem
+
+			if serverInfo.TotalMemory == 0 && serverInfo.FreeMemory == 0 {
+				slog.Warn("Unable to connect to endpoint", "endpoint", server)
+			} else {
+				slog.Debug("Found RPC Server", "info", serverInfo)
+				rpcServers = append(rpcServers, serverInfo)
+			}
+		}
 
 		// NVIDIA
 		for i := range cHandles.deviceCount {
@@ -480,6 +584,9 @@ func GetGPUInfo() GpuInfoList {
 	}
 
 	resp := []GpuInfo{}
+	for _, gpu := range rpcServers {
+		resp = append(resp, gpu.GpuInfo)
+	}
 	for _, gpu := range cudaGPUs {
 		resp = append(resp, gpu.GpuInfo)
 	}

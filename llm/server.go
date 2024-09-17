@@ -100,7 +100,7 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, f *ggml.GGML, adapt
 	if opts.NumGPU == 0 {
 		gpus = discover.GetCPUInfo()
 	}
-	rpcServers := envconfig.RPCServers()
+
 
 	estimate := EstimateGPULayers(gpus, f, projectors, opts)
 	if len(gpus) > 1 || gpus[0].Library != "cpu" {
@@ -109,13 +109,6 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, f *ggml.GGML, adapt
 			// disable partial offloading when model is greater than total system memory as this
 			// can lead to locking up the system
 			opts.NumGPU = 0
-		// TODO: Maybe move RPC servers to gpus list?
-		// TODO: Check if servers are available.
-		// TODO: Check memory of RPC servers.
-		case rpcServers != "":
-			estimate.Layers = int(ggml.KV().BlockCount()) + 1
-			estimate.VRAMSize = estimate.TotalSize
-			opts.NumGPU = estimate.Layers
 		case gpus[0].Library != "metal" && estimate.Layers == 0:
 			// Don't bother loading into the GPU if no layers can fit
 			gpus = discover.GetCPUInfo()
@@ -151,6 +144,17 @@ func NewLlamaServer(gpus discover.GpuInfoList, model string, f *ggml.GGML, adapt
 		params = append(params, "--verbose")
 	}
 
+	rpcServers := ""
+	for _, gpu := range gpus {
+		if gpu.Library != "rpc" {
+			continue
+		}
+
+		if rpcServers != "" {
+			rpcServers += ","
+		}
+		rpcServers += gpu.ID
+	}
 	if rpcServers != "" {
 		params = append(params, "--rpc", rpcServers)
 	}
